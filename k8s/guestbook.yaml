@@ -1,0 +1,126 @@
+# Guestbook（AP: Flask × 3台 / DB: PostgreSQL × 1台）
+# 使い方: kubectl apply -f guestbook.yaml
+# 台数変更: kubectl scale deployment frontend --replicas=5
+# 片付け:   kubectl delete -f guestbook.yaml
+#           （DBのPVCは残るので、消すなら kubectl delete pvc data-postgres-0）
+#
+# image: の ghcr.io/YOUR_GITHUB_USER/... は自分のリポジトリ名に置き換えてください
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: guestbook-db
+type: Opaque
+stringData:
+  POSTGRES_DB: guestbook
+  POSTGRES_USER: guestbook
+  POSTGRES_PASSWORD: change-me
+---
+# DB: StatefulSet ＋ PVC（既定の StorageClass。NKP なら Nutanix CSI のボリューム）
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: docker.io/library/postgres:17
+        envFrom:
+        - secretRef:
+            name: guestbook-db
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        ports:
+        - containerPort: 5432
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+          periodSeconds: 5
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+---
+# AP: Deployment（中身は ReplicaSet）。replicas を変えると台数が変わる
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: guestbook
+        image: ghcr.io/YOUR_GITHUB_USER/k8s-guestbook:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: POD_NAME            # 画面に表示する Pod 名
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: DB_HOST
+          value: postgres
+        - name: DB_NAME
+          valueFrom: {secretKeyRef: {name: guestbook-db, key: POSTGRES_DB}}
+        - name: DB_USER
+          valueFrom: {secretKeyRef: {name: guestbook-db, key: POSTGRES_USER}}
+        - name: DB_PASSWORD
+          valueFrom: {secretKeyRef: {name: guestbook-db, key: POSTGRES_PASSWORD}}
+        readinessProbe:
+          httpGet: {path: /readyz, port: 8080}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /healthz, port: 8080}
+          initialDelaySeconds: 70
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  type: LoadBalancer
+  selector:
+    app: frontend
+  ports:
+  - port: 80
+    targetPort: 8080
