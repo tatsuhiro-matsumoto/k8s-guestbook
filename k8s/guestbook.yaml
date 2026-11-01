@@ -4,7 +4,6 @@
 # 片付け:   kubectl delete -f guestbook.yaml
 #           （DBのPVCは残るので、消すなら kubectl delete pvc data-postgres-0）
 #
-# image: の ghcr.io/YOUR_GITHUB_USER/... は自分のリポジトリ名に置き換えてください
 ---
 apiVersion: v1
 kind: Secret
@@ -86,7 +85,7 @@ spec:
     spec:
       containers:
       - name: guestbook
-        image: ghcr.io/YOUR_GITHUB_USER/k8s-guestbook:latest
+        image: ghcr.io/tatsuhiro-matsumoto/k8s-guestbook:latest
         ports:
         - containerPort: 8080
         env:

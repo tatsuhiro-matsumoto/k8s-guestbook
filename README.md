@@ -14,10 +14,10 @@ Kubernetes（NKP など）のデモ用、シンプルな記録帳アプリです
    ```
    git init && git add . && git commit -m "first commit"
    git branch -M main
-   git remote add origin https://github.com/<ユーザー名>/k8s-guestbook.git
+   git remote add origin https://github.com/tatsuhiro-matsumoto/k8s-guestbook.git
    git push -u origin main
    ```
-3. GitHub Actions が自動でイメージをビルドし、`ghcr.io/<ユーザー名>/k8s-guestbook:latest` に push します（Actions タブで確認）
+3. GitHub Actions が自動でイメージをビルドし、`ghcr.io/tatsuhiro-matsumoto/k8s-guestbook:latest` に push します（Actions タブで確認）
 4. **イメージを公開にする**：GitHub のプロフィール → Packages → k8s-guestbook → Package settings → Change visibility → Public
    （非公開のままだと、クラスタから pull するのに認証が必要になります）
 
@@ -25,7 +25,7 @@ Kubernetes（NKP など）のデモ用、シンプルな記録帳アプリです
 
 ## 2. デプロイ
 
-`k8s/guestbook.yaml` の `YOUR_GITHUB_USER` を自分のユーザー名（小文字）に置き換えてから：
+GitHub Actions のビルドが終わり、イメージを Public にしたら：
 
 ```
 kubectl apply -f k8s/guestbook.yaml
@@ -55,5 +55,6 @@ kubectl delete pvc data-postgres-0   # DB のデータも消す場合
 
 - DB パスワードは `guestbook.yaml` の Secret（`change-me`）。デモ以外で使うなら変更してください
 - PVC は既定の StorageClass を使います。指定したい場合は `volumeClaimTemplates` に `storageClassName` を追加
-- **エアギャップ環境**：`ghcr.io/<ユーザー名>/k8s-guestbook:latest` と `postgres:17` を社内レジストリ（Harbor など）にコピーし、`image:` をそちらに書き換えれば動きます
+- **エアギャップ環境**：`ghcr.io/tatsuhiro-matsumoto/k8s-guestbook:latest` と `postgres:17` を社内レジストリ（Harbor など）にコピーし、`image:` をそちらに書き換えれば動きます
+- このリポジトリを fork して自分のイメージを使う場合は、`k8s/guestbook.yaml` の `image:` を自分の `ghcr.io/<ユーザー名>/k8s-guestbook:latest` に変更
 - ローカルで試す：`docker build -t k8s-guestbook .`
