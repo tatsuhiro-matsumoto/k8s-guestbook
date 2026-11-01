@@ -83,23 +83,51 @@ def pod_color(name: str) -> str:
     return f"hsl({hue}, 65%, 45%)"
 
 
-def k8s_pods():
-    """Kubernetes API から同じ namespace の Pod 一覧を取る（ServiceAccount の権限を使用）"""
+def k8s_get(path):
+    """Kubernetes API を呼ぶ（ServiceAccount の権限を使用）"""
     with open(f"{SA_DIR}/token") as f:
         token = f.read()
     ctx = ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
     req = urllib.request.Request(
-        f"https://kubernetes.default.svc/api/v1/namespaces/{NAMESPACE}/pods",
+        f"https://kubernetes.default.svc{path}",
         headers={"Authorization": f"Bearer {token}"},
     )
     with urllib.request.urlopen(req, context=ctx, timeout=3) as r:
         return json.load(r)["items"]
 
 
-def pod_state(p):
+def k8s_pods():
+    """同じ namespace の Pod 一覧"""
+    return k8s_get(f"/api/v1/namespaces/{NAMESPACE}/pods")
+
+
+def k8s_nodes():
+    """ノードごとの Ready 状態（取れなければ空）"""
+    try:
+        items = k8s_get("/api/v1/nodes")
+    except Exception:  # noqa: BLE001
+        return {}
+    res = {}
+    for n in items:
+        conds = {c["type"]: c["status"] for c in n.get("status", {}).get("conditions", [])}
+        res[n["metadata"]["name"]] = conds.get("Ready") == "True"
+    return res
+
+
+def pod_ready(p):
+    """Pod の Ready 条件（ノード障害時は K8s がここを False にする）"""
+    for c in p.get("status", {}).get("conditions") or []:
+        if c.get("type") == "Ready":
+            return c.get("status") == "True"
+    return False
+
+
+def pod_state(p, node_ready=None):
     """kubectl get pods の STATUS に近い表示と、色分け用の区分を返す"""
     if p["metadata"].get("deletionTimestamp"):
         return "Terminating", "gone"
+    if node_ready is False:
+        return "Node NotReady", "bad"
     statuses = p.get("status", {}).get("containerStatuses") or []
     for c in statuses:
         waiting = c.get("state", {}).get("waiting")
@@ -109,8 +137,7 @@ def pod_state(p):
             return reason, "bad" if bad else "wait"
     phase = p.get("status", {}).get("phase", "Unknown")
     if phase == "Running":
-        ready = statuses and all(c.get("ready") for c in statuses)
-        return ("Running", "ok") if ready else ("Running (not ready)", "wait")
+        return ("Running", "ok") if pod_ready(p) else ("Running (not ready)", "wait")
     if phase == "Pending":
         return "Pending", "wait"
     return phase, "bad" if phase == "Failed" else "wait"
@@ -208,8 +235,8 @@ async function load(){
         <div class="t">${p.no?p.no+"番Pod":esc(p.group)}${p.name===ME?" ← このページ":""}</div>
         <div class="n">${esc(p.name)}</div>
         <span class="s">${esc(p.status)}</span>
-        <div>Ready ${esc(p.ready)}・再起動 ${p.restarts}・${esc(p.age)}</div>
-        <div>Node: ${esc(p.node||"-")}</div>
+        <div>Ready: ${esc(p.ready)}・再起動 ${p.restarts}・${esc(p.age)}</div>
+        <div>Node: ${esc(p.node||"-")}${p.node_ready===false?" (NotReady)":""}</div>
       </div>`).join("");
   }catch(e){document.getElementById("summary").textContent="Pod 情報を取得できません";}
 }
@@ -243,22 +270,25 @@ def api_pods():
             nos = dict(conn.execute("SELECT pod, no FROM pods").fetchall())
     except Exception:  # noqa: BLE001
         nos = {}
+    nodes = k8s_nodes()
     pods = []
     for p in items:
         md = p["metadata"]
         st = p.get("status", {})
         cs = st.get("containerStatuses") or []
-        status, cls = pod_state(p)
+        node = p["spec"].get("nodeName")
+        status, cls = pod_state(p, nodes.get(node))
         pods.append({
             "name": md["name"],
             "group": md.get("labels", {}).get("app", "other"),
             "no": nos.get(md["name"]),
             "status": status,
             "cls": cls,
-            "ready": f"{sum(1 for c in cs if c.get('ready'))}/{len(p['spec']['containers'])}",
+            "ready": "はい" if pod_ready(p) else "いいえ",
             "restarts": sum(c.get("restartCount", 0) for c in cs),
             "age": age(md.get("creationTimestamp")),
-            "node": p["spec"].get("nodeName"),
+            "node": node,
+            "node_ready": nodes.get(node),
             "_order": (md.get("labels", {}).get("app", ""), nos.get(md["name"]) or 10**9, md["name"]),
         })
     pods.sort(key=lambda x: x.pop("_order"))
