@@ -2,19 +2,26 @@
 - 画面に「このリクエストを処理した Pod」を「X番Pod（起動順）」と正式名で表示する
 - Pod は起動時に DB へ自分を登録し、起動順の番号をもらう
 - 投稿ごとに「書き込んだ Pod」を PostgreSQL に保存する
+- Kubernetes API から同じ namespace の Pod 一覧を取り、状態をカードで表示する（2秒ごとに更新）
 """
 import hashlib
+import json
 import os
 import socket
+import ssl
 import time
+import urllib.request
+from datetime import datetime, timezone
 
 import psycopg
-from flask import Flask, redirect, render_template_string, request
+from flask import Flask, jsonify, redirect, render_template_string, request
 
 app = Flask(__name__)
 
 POD_NAME = os.environ.get("POD_NAME", socket.gethostname())
 POD_NO = None  # 起動時に DB から割り当てる
+NAMESPACE = os.environ.get("POD_NAMESPACE", "default")
+SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 DSN = (
     f"host={os.environ.get('DB_HOST', 'postgres')} "
     f"port={os.environ.get('DB_PORT', '5432')} "
@@ -76,6 +83,50 @@ def pod_color(name: str) -> str:
     return f"hsl({hue}, 65%, 45%)"
 
 
+def k8s_pods():
+    """Kubernetes API から同じ namespace の Pod 一覧を取る（ServiceAccount の権限を使用）"""
+    with open(f"{SA_DIR}/token") as f:
+        token = f.read()
+    ctx = ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
+    req = urllib.request.Request(
+        f"https://kubernetes.default.svc/api/v1/namespaces/{NAMESPACE}/pods",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(req, context=ctx, timeout=3) as r:
+        return json.load(r)["items"]
+
+
+def pod_state(p):
+    """kubectl get pods の STATUS に近い表示と、色分け用の区分を返す"""
+    if p["metadata"].get("deletionTimestamp"):
+        return "Terminating", "gone"
+    statuses = p.get("status", {}).get("containerStatuses") or []
+    for c in statuses:
+        waiting = c.get("state", {}).get("waiting")
+        if waiting:
+            reason = waiting.get("reason", "Waiting")
+            bad = reason in ("CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "Error")
+            return reason, "bad" if bad else "wait"
+    phase = p.get("status", {}).get("phase", "Unknown")
+    if phase == "Running":
+        ready = statuses and all(c.get("ready") for c in statuses)
+        return ("Running", "ok") if ready else ("Running (not ready)", "wait")
+    if phase == "Pending":
+        return "Pending", "wait"
+    return phase, "bad" if phase == "Failed" else "wait"
+
+
+def age(ts):
+    if not ts:
+        return ""
+    sec = int((datetime.now(timezone.utc) - datetime.fromisoformat(ts.replace("Z", "+00:00"))).total_seconds())
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m"
+    return f"{sec // 3600}h{sec % 3600 // 60}m"
+
+
 PAGE = """<!doctype html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -99,6 +150,18 @@ PAGE = """<!doctype html>
  li{padding:.5rem 0;border-bottom:1px solid #ddd;list-style:none}
  ul{padding:0} .meta{font-size:.8rem;color:#777}
  .tag{display:inline-block;padding:0 .4rem;border-radius:4px;color:#fff;font-size:.75rem}
+ h2{font-size:1.1rem;margin:2rem 0 .3rem}
+ .summary{font-size:.9rem;color:#555;margin-bottom:.6rem}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem}
+ .card{border:2px solid #ccc;border-radius:8px;padding:.6rem;font-size:.8rem;background:#fafafa}
+ .card .t{font-weight:bold;font-size:1rem}
+ .card .n{font-family:monospace;word-break:break-all;color:#555}
+ .card .s{display:inline-block;margin:.3rem 0;padding:0 .4rem;border-radius:4px;color:#fff}
+ .card.me{box-shadow:0 0 0 3px #222}
+ .ok .s{background:#2e8b57} .ok{border-color:#2e8b57}
+ .wait .s{background:#d08a00} .wait{border-color:#d08a00}
+ .bad .s{background:#c33} .bad{border-color:#c33}
+ .gone{opacity:.5} .gone .s{background:#888}
 </style></head><body>
 <h1>{% if logo %}<img src="/static/{{ logo }}" alt="">{% endif %}Nutanix Guestbook</h1>
 <div class="pod">
@@ -125,6 +188,33 @@ PAGE = """<!doctype html>
   <li class="meta">まだ書き込みはありません</li>
 {% endfor %}
 </ul>
+<h2>Pod の状態 <small style="font-weight:normal;color:#777">（namespace: {{ ns }}・2秒ごとに更新）</small></h2>
+<div class="summary" id="summary">読み込み中…</div>
+<div class="grid" id="pods"></div>
+<script>
+const ME = {{ pod|tojson }};
+function esc(t){return String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+async function load(){
+  try{
+    const r = await fetch("/api/pods",{cache:"no-store"});
+    const d = await r.json();
+    if(d.error){document.getElementById("summary").textContent=d.error;return;}
+    const c = {};
+    d.pods.forEach(p=>c[p.group]=(c[p.group]||0)+1);
+    document.getElementById("summary").textContent =
+      "Pod 合計 " + d.pods.length + " 個（" + Object.entries(c).map(([k,v])=>k+": "+v).join("、") + "）";
+    document.getElementById("pods").innerHTML = d.pods.map(p =>
+      `<div class="card ${p.cls}${p.name===ME?' me':''}">
+        <div class="t">${p.no?p.no+"番Pod":esc(p.group)}${p.name===ME?" ← このページ":""}</div>
+        <div class="n">${esc(p.name)}</div>
+        <span class="s">${esc(p.status)}</span>
+        <div>Ready ${esc(p.ready)}・再起動 ${p.restarts}・${esc(p.age)}</div>
+        <div>Node: ${esc(p.node||"-")}</div>
+      </div>`).join("");
+  }catch(e){document.getElementById("summary").textContent="Pod 情報を取得できません";}
+}
+load(); setInterval(load,2000);
+</script>
 </body></html>"""
 
 
@@ -138,8 +228,41 @@ def index():
         ).fetchall()
     return render_template_string(
         PAGE, pod=POD_NAME, pod_no=POD_NO, color=pod_color(POD_NAME),
-        entries=rows, colorof=pod_color, logo=LOGO,
+        entries=rows, colorof=pod_color, logo=LOGO, ns=NAMESPACE,
     )
+
+
+@app.get("/api/pods")
+def api_pods():
+    try:
+        items = k8s_pods()
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=f"Pod 情報を取得できません（ServiceAccount の権限を確認）: {e}")
+    try:
+        with connect() as conn:
+            nos = dict(conn.execute("SELECT pod, no FROM pods").fetchall())
+    except Exception:  # noqa: BLE001
+        nos = {}
+    pods = []
+    for p in items:
+        md = p["metadata"]
+        st = p.get("status", {})
+        cs = st.get("containerStatuses") or []
+        status, cls = pod_state(p)
+        pods.append({
+            "name": md["name"],
+            "group": md.get("labels", {}).get("app", "other"),
+            "no": nos.get(md["name"]),
+            "status": status,
+            "cls": cls,
+            "ready": f"{sum(1 for c in cs if c.get('ready'))}/{len(p['spec']['containers'])}",
+            "restarts": sum(c.get("restartCount", 0) for c in cs),
+            "age": age(md.get("creationTimestamp")),
+            "node": p["spec"].get("nodeName"),
+            "_order": (md.get("labels", {}).get("app", ""), nos.get(md["name"]) or 10**9, md["name"]),
+        })
+    pods.sort(key=lambda x: x.pop("_order"))
+    return jsonify(pods=pods)
 
 
 @app.post("/")

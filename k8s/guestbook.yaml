@@ -68,6 +68,33 @@ spec:
   ports:
   - port: 5432
 ---
+# 画面に Pod の状態を出すため、同じ namespace の Pod を読む権限だけを持たせる
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: guestbook
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guestbook-pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guestbook-pod-reader
+subjects:
+- kind: ServiceAccount
+  name: guestbook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: guestbook-pod-reader
+---
 # AP: Deployment（中身は ReplicaSet）。replicas を変えると台数が変わる
 apiVersion: apps/v1
 kind: Deployment
@@ -83,6 +110,7 @@ spec:
       labels:
         app: frontend
     spec:
+      serviceAccountName: guestbook
       containers:
       - name: guestbook
         image: ghcr.io/tatsuhiro-matsumoto/k8s-guestbook:latest
@@ -93,6 +121,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        - name: POD_NAMESPACE       # Pod 一覧を取る namespace
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: DB_HOST
           value: postgres
         - name: DB_NAME
